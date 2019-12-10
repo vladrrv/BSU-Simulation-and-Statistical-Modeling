@@ -5,6 +5,13 @@ RANDOM_SEED = 42
 random.seed(RANDOM_SEED)
 
 
+def mean(l):
+    if isinstance(l[0], tuple):
+        return sum([x[0]*x[1] for x in l]) / sum([x[1] for x in l])
+    else:
+        return sum(l)/len(l)
+
+
 class Simulation:
     def __init__(self, m=1, mu1=0.5, s1=0.1, t1=0.2, t2=0.5, mu2=20, s2=2, l=4/3):
         self.job_distr = lambda: random.expovariate(1 / m)
@@ -18,12 +25,20 @@ class Simulation:
 
         self.queue = []
         self.queue_times = []
+        self.queue_sizes = []
+        self.size_start_time = 0
+        self.empty_times = []
+        self.empty_start_time = 0
         self.busy = False
 
-        self.free_time = 0
-        self.prep_time = 0
-        self.working_time = 0
-        self.repair_time = 0
+        self.total_times = {
+            "free": [],
+            "prep": [],
+            "working": [],
+            "repair": []
+        }
+
+        self.parts_need = 0
         self.parts_made = 0
 
         self.env.process(self.new_part())
@@ -31,28 +46,49 @@ class Simulation:
         self.process = self.env.process(self.working())
 
     def new_part(self):
+        self.empty_start_time = self.env.now
+        self.size_start_time = self.env.now
         while True:
-            yield self.env.timeout(self.job_distr())
-            self.queue.append(self.env.now)
+            job_time = self.job_distr()
+            yield self.env.timeout(job_time)
+            now = self.env.now
+            self.parts_need += 1
+
+            queue_size = self.container_queue.level
+            self.queue_sizes.append((queue_size, now - self.size_start_time))
+            self.size_start_time = now
+
+            if queue_size == 0:
+                self.empty_times.append(now - self.empty_start_time)
+
+            self.queue.append(now)
             yield self.container_queue.put(1)
 
     def working(self):
         end = self.env.now  # time since last part was finished
         while True:
             yield self.container_queue.get(1)
-            self.queue_times.append(self.env.now - self.queue[0])
+            now = self.env.now
+
+            queue_size = self.container_queue.level
+            self.queue_sizes.append((queue_size+1, now - self.size_start_time))
+            self.size_start_time = now
+
+            if queue_size == 0:
+                self.empty_start_time = now
+            self.queue_times.append(now - self.queue[0])
             self.queue = self.queue[1:]
 
-            self.free_time += self.env.now - end
+            self.total_times["free"].append(now - end)
 
             # Prepare for working on the part
             prep_time = self.prep_distr()
             yield self.env.timeout(prep_time)
-            self.prep_time += prep_time
+            self.total_times["prep"].append(prep_time)
 
             # Start working on the part
             proc_time_left = self.proc_distr()
-            self.working_time += proc_time_left
+            self.total_times["working"].append(proc_time_left)
             while proc_time_left:
                 self.busy = True
                 start = self.env.now
@@ -71,7 +107,7 @@ class Simulation:
                         time_to_repair = self.repair_distr()
                         yield self.env.timeout(time_to_repair)
                         self.queue_times[-1] += time_to_repair
-                        self.repair_time += time_to_repair
+                        self.total_times["repair"].append(time_to_repair)
 
             # Part is done
             end = self.env.now
@@ -86,14 +122,29 @@ class Simulation:
 
     def run(self, T=500):
         self.env.run(until=T)
-        print(f'Total free time:\t{self.free_time:.3f} hrs')
-        print(f'Total prep time:\t{self.prep_time:.3f} hrs')
-        print(f'Total working time:\t{self.working_time:.3f} hrs')
-        print(f'Total repair time:\t{self.repair_time:.3f} hrs')
+
+        time_str = "{:.3f} hrs"
+
+        for key, value in self.total_times.items():
+            print(f'Total {key} time:', time_str.format(sum(value)))
+
+        print('Average working time:', time_str.format(mean(self.total_times["working"])))
+
+        print('Free time/working time ratio: '
+              f'{round(sum(self.total_times["free"])*100/sum(self.total_times["working"]), 1)}%')
+
+        print('Waiting time in queue:',
+              '\n average:', time_str.format(mean(self.queue_times)),
+              '\n maximum:', time_str.format(max(self.queue_times)))
+
+        print('Queue size:',
+              '\n average:', round(mean(self.queue_sizes), 3),
+              '\n maximum:', max([x[0] for x in self.queue_sizes]))
+
+        print(f'Average empty queue time:', time_str.format(mean(self.empty_times)))
+
+        print('Parts need:', self.parts_need)
         print('Parts made:', self.parts_made)
-        print('Waiting time in queue:')
-        print(f' average:\t{sum(self.queue_times)/len(self.queue_times):.3f} hrs')
-        print(f' maximum:\t{max(self.queue_times):.3f} hrs')
 
 
 if __name__ == "__main__":
